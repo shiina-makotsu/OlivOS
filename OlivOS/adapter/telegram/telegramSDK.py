@@ -16,6 +16,7 @@ _  / / /_  /  __  / __ | / /_  / / /____ \
 
 import requests as req
 import json
+import re
 
 import OlivOS
 
@@ -100,6 +101,8 @@ class event(object):
         self.raw = self.event_dump(json_obj)
         self.json = json_obj
         self.platform = {}
+        self.platform['reply'] = False
+        self.platform['at'] = False
         if sdk_mode == 'poll':
             self.platform['sdk'] = 'telegram_poll'
         elif sdk_mode == 'hook':
@@ -174,6 +177,46 @@ def checkByListAnd(check_list):
     return flag_res
 
 
+def checkChatTypeInList(var_it, var_dict, var_path=None, type_list=None):
+    if type_list is None:
+        type_list = []
+    if var_path is None:
+        var_path = []
+    var_dict_this = var_dict
+    for var_key_this in var_path:
+        if var_key_this in var_dict_this:
+            var_dict_this = var_dict_this[var_key_this]
+        else:
+            return False
+    if var_dict_this in type_list:
+        return True
+    else:
+        return False
+
+
+def handle_reply_message(target_event, message_list):
+    is_reply = 'reply_to_message' in target_event.sdk_event.json['message']
+    if is_reply:
+        reply_msg = target_event.sdk_event.json['message']['reply_to_message']
+        reply_id = str(reply_msg.get('message_id', ''))
+        reply_user_id = str(
+            reply_msg.get('from', {}).get('id', '')
+        )
+        reply_name = str(
+            reply_msg.get('from', {}).get('first_name', '')
+        )
+        message_list.append(
+            OlivOS.messageAPI.PARA.reply(
+                id=reply_id
+            )
+        )
+        target_event.reply_info = {
+            "reply_id": reply_id,
+            "reply_user_id": reply_user_id,
+            "reply_name": reply_name,
+        }
+
+
 def get_message_obj_from_SDK(target_event):
     message_obj = None
     if True:
@@ -182,43 +225,24 @@ def get_message_obj_from_SDK(target_event):
         ]):
             message_list = []
             tmp_message_raw = target_event.sdk_event.json['message']['text']
-            tmp_message_raw_1 = ''
-            tmp_message_raw_2 = ''
-            tmp_message_raw_3 = ''
-            tmp_message_raw_3 = tmp_message_raw
-            tmp_message_offset_count = 0
-            if checkByListAnd([
-                checkInDictSafe('entities', target_event.sdk_event.json, ['message'])
-            ]):
-                for entities_this in target_event.sdk_event.json['message']['entities']:
-                    if entities_this['type'] == 'mention':
-                        tmp_message_raw_1 = ''
-                        tmp_message_raw_2 = ''
-                        tmp_message_raw_3 = ''
-                        tmp_message_raw_1 = tmp_message_raw[tmp_message_offset_count:entities_this['offset']]
-                        tmp_message_raw_2 = tmp_message_raw[
-                                            entities_this['offset']:entities_this['offset'] + entities_this['length']]
-                        tmp_message_raw_2 = tmp_message_raw_2[1:]
-                        tmp_message_raw_3 = tmp_message_raw[entities_this['offset'] + entities_this['length']:]
-                        tmp_message_offset_count = entities_this['offset'] + entities_this['length']
-                        if len(tmp_message_raw_1) > 0:
-                            message_list.append(
-                                OlivOS.messageAPI.PARA.text(
-                                    text=tmp_message_raw_1
-                                )
-                            )
-                        if len(tmp_message_raw_2) > 0:
+            handle_reply_message(target_event, message_list)
+            if 'entities' in target_event.sdk_event.json['message']:
+                for ent in target_event.sdk_event.json['message']['entities']:
+                    if ent['type'] in ['mention', 'text_mention']:
+                        mention_text = tmp_message_raw[
+                            ent['offset']: ent['offset'] + ent['length']
+                        ]
+                        if mention_text.startswith("@"):
                             message_list.append(
                                 OlivOS.messageAPI.PARA.at(
-                                    id=tmp_message_raw_2
+                                    id=mention_text[1:]
                                 )
                             )
-            if len(tmp_message_raw_3) > 0:
-                message_list.append(
-                    OlivOS.messageAPI.PARA.text(
-                        text=tmp_message_raw_3
-                    )
+            message_list.append(
+                OlivOS.messageAPI.PARA.text(
+                    text=tmp_message_raw
                 )
+            )
             message_obj = OlivOS.messageAPI.Message_templet(
                 'olivos_para',
                 message_list
@@ -228,6 +252,7 @@ def get_message_obj_from_SDK(target_event):
             checkInDictSafe('photo', target_event.sdk_event.json, ['message'])
         ]):
             message_list = []
+            handle_reply_message(target_event, message_list)
             if type(target_event.sdk_event.json['message']['photo']) is list:
                 message_list.append(
                     OlivOS.messageAPI.PARA.image(
@@ -251,6 +276,7 @@ def get_message_obj_from_SDK(target_event):
             checkInDictSafe('sticker', target_event.sdk_event.json, ['message'])
         ]):
             message_list = []
+            handle_reply_message(target_event, message_list)
             message_list.append(
                 OlivOS.messageAPI.PARA.image(
                     target_event.sdk_event.json['message']['sticker']['file_id']
@@ -278,6 +304,8 @@ def get_Event_from_SDK(target_event):
         platform_platform=target_event.platform['platform'],
         platform_model=target_event.platform['model']
     )
+    if 'reply_to_message' in target_event.sdk_event.json.get('message', {}):
+        target_event.platform['reply'] = True
     if plugin_event_bot_hash not in sdkSubSelfInfo:
         tmp_bot_info = bot_info_T(
             target_event.sdk_event.base_info['self_id'],
@@ -292,7 +320,19 @@ def get_Event_from_SDK(target_event):
             if tmp_api_json['ok'] is True:
                 sdkSubSelfInfo[plugin_event_bot_hash] = tmp_api_json['result']['username']
         except Exception:
-            pass
+            pass    
+    bot_name = sdkSubSelfInfo.get(plugin_event_bot_hash, "").lower()
+    if 'entities' in target_event.sdk_event.json.get('message', {}):
+        message_text = target_event.sdk_event.json['message'].get('text', '')
+        for ent in target_event.sdk_event.json['message']['entities']:
+            if ent.get('type') in ['mention', 'text_mention']:
+                mention_text = message_text[
+                    ent['offset']: ent['offset'] + ent['length']
+                ].lower()
+                if mention_text == f"@{bot_name}":
+                    target_event.platform['at'] = True
+                    break
+
     if checkByListAnd([
         not target_event.active,
         checkInDictSafe('message', target_event.sdk_event.json, []),
@@ -301,7 +341,6 @@ def get_Event_from_SDK(target_event):
         checkInDictSafe('message_id', target_event.sdk_event.json, ['message']),
         checkInDictSafe('from', target_event.sdk_event.json, ['message']),
         checkInDictSafe('first_name', target_event.sdk_event.json, ['message', 'from']),
-        # checkInDictSafe('text', target_event.sdk_event.json, ['message']),
         checkEquelInDictSafe('private', target_event.sdk_event.json, ['message', 'chat', 'type'])
     ]):
         message_obj = None
@@ -319,6 +358,9 @@ def get_Event_from_SDK(target_event):
         target_event.data.raw_message = message_obj
         target_event.data.raw_message_sdk = message_obj
         target_event.data.font = None
+        target_event.data.is_at = target_event.platform.get('at', False)
+        target_event.data.is_reply = target_event.platform.get('reply', False)
+        target_event.data.reply_info = getattr(target_event,"reply_info",{})
         target_event.data.sender['user_id'] = str(target_event.sdk_event.json['message']['from']['id'])
         target_event.data.sender['nickname'] = target_event.sdk_event.json['message']['from']['first_name']
         target_event.data.sender['id'] = str(target_event.sdk_event.json['message']['from']['id'])
@@ -337,8 +379,7 @@ def get_Event_from_SDK(target_event):
         checkInDictSafe('from', target_event.sdk_event.json, ['message']),
         checkInDictSafe('id', target_event.sdk_event.json, ['message', 'from']),
         checkInDictSafe('first_name', target_event.sdk_event.json, ['message', 'from']),
-        # checkInDictSafe('text', target_event.sdk_event.json, ['message']),
-        checkEquelInDictSafe('group', target_event.sdk_event.json, ['message', 'chat', 'type'])
+        checkChatTypeInList(None, target_event.sdk_event.json, ['message', 'chat', 'type'], ['group', 'supergroup'])
     ]):
         message_obj = None
         message_obj = get_message_obj_from_SDK(target_event)
@@ -357,6 +398,9 @@ def get_Event_from_SDK(target_event):
         target_event.data.raw_message = message_obj
         target_event.data.raw_message_sdk = message_obj
         target_event.data.font = None
+        target_event.data.is_at = target_event.platform.get('at', False)
+        target_event.data.is_reply = target_event.platform.get('reply', False)
+        target_event.data.reply_info = getattr(target_event,"reply_info",{})
         target_event.data.sender['user_id'] = str(target_event.sdk_event.json['message']['from']['id'])
         target_event.data.sender['nickname'] = target_event.sdk_event.json['message']['from']['first_name']
         target_event.data.sender['id'] = str(target_event.sdk_event.json['message']['from']['id'])
@@ -365,44 +409,6 @@ def get_Event_from_SDK(target_event):
         target_event.data.sender['age'] = 0
         if plugin_event_bot_hash in sdkSubSelfInfo:
             target_event.data.extend['sub_self_id'] = str(sdkSubSelfInfo[plugin_event_bot_hash])
-    if checkByListAnd([
-        not target_event.active,
-        'message' in target_event.sdk_event.json,
-        checkInDictSafe('message', target_event.sdk_event.json, []),
-        checkInDictSafe('chat', target_event.sdk_event.json, ['message']),
-        checkInDictSafe('type', target_event.sdk_event.json, ['message', 'chat']),
-        checkInDictSafe('message_id', target_event.sdk_event.json, ['message']),
-        checkInDictSafe('from', target_event.sdk_event.json, ['message']),
-        checkInDictSafe('id', target_event.sdk_event.json, ['message', 'from']),
-        checkInDictSafe('first_name', target_event.sdk_event.json, ['message', 'from']),
-        # checkInDictSafe('text', target_event.sdk_event.json, ['message']),
-        checkEquelInDictSafe('supergroup', target_event.sdk_event.json, ['message', 'chat', 'type'])
-    ]):
-        message_obj = None
-        message_obj = get_message_obj_from_SDK(target_event)
-        if not target_event.active:
-            return target_event.active
-        target_event.active = True
-        target_event.plugin_info['func_type'] = 'group_message'
-        target_event.data = target_event.group_message(
-            str(target_event.sdk_event.json['message']['chat']['id']),
-            str(target_event.sdk_event.json['message']['from']['id']),
-            message_obj,
-            'group'
-        )
-        target_event.data.message_sdk = message_obj
-        target_event.data.message_id = target_event.sdk_event.json['message']['message_id']
-        target_event.data.raw_message = message_obj
-        target_event.data.raw_message_sdk = message_obj
-        target_event.data.font = None
-        target_event.data.sender['user_id'] = str(target_event.sdk_event.json['message']['from']['id'])
-        target_event.data.sender['nickname'] = target_event.sdk_event.json['message']['from']['first_name']
-        target_event.data.sender['id'] = str(target_event.sdk_event.json['message']['from']['id'])
-        target_event.data.sender['name'] = target_event.sdk_event.json['message']['from']['first_name']
-        target_event.data.sender['sex'] = 'unknown'
-        target_event.data.sender['age'] = 0
-        if plugin_event_bot_hash in sdkSubSelfInfo:
-            target_event.data.extend['sub_self_id'] = sdkSubSelfInfo[plugin_event_bot_hash]
     if checkByListAnd([
         not target_event.active,
         'message' in target_event.sdk_event.json,
@@ -450,29 +456,84 @@ def get_Event_from_SDK(target_event):
     return target_event.active
 
 
-# 支持OlivOS API调用的方法实现
+class telegram_api_caller(object):
+    
+    @staticmethod
+    def send_message_with_reply(bot_token, chat_id, text, reply_to_message_id=None, parse_mode="MarkdownV2"):
+        import requests
+        url = f"https://api.telegram.org/bot{bot_token}/sendMessage"
+        payload = {
+            "chat_id": str(chat_id),
+            "text": text,
+            "parse_mode": parse_mode,
+            "disable_web_page_preview": True
+        }
+        if reply_to_message_id:
+            payload["reply_to_message_id"] = int(reply_to_message_id)
+            payload["allow_sending_without_reply"] = True
+        
+        headers = {
+            'Content-Type': 'application/json',
+            'User-Agent': OlivOS.infoAPI.OlivOS_Header_UA
+        }
+        try:
+            response = requests.post(url, json=payload, headers=headers, timeout=10)
+            return response
+        except Exception as e:
+            print(f"[TelegramAPI] Error: {e}")
+            return None
+
+
 class event_action(object):
-    def send_msg(target_event, chat_id, message):
+    def send_msg(target_event, chat_id, message, reply_info=None):
+
+        
+        if reply_info is None and hasattr(target_event, 'data'):
+            reply_info = getattr(target_event.data, 'reply_info', None)
+        
         this_msg = API.sendMessage(get_SDK_bot_info_from_Event(target_event))
         this_msg_image = API.sendPhoto(get_SDK_bot_info_from_Event(target_event))
         this_msg.data.chat_id = str(chat_id)
         this_msg_image.data.chat_id = str(chat_id)
         this_msg.data.text = ''
         flag_now_type = 'string'
+        reply_id = None
+        if reply_info and isinstance(reply_info, dict):
+            reply_id = reply_info.get("reply_id")
         if message is not None:
             if type(message.data) is list:
                 for message_this in message.data:
+                    if type(message_this) is OlivOS.messageAPI.PARA.reply:
+                        continue
                     if type(message_this) is OlivOS.messageAPI.PARA.image:
                         if flag_now_type != 'image':
                             if this_msg.data.text != '':
                                 this_msg.do_api()
                                 this_msg.data.text = ''
                         this_msg_image.data.photo = message_this.data['file']
+                        if reply_id is not None:
+                            this_msg_image.data.reply_to_message_id = int(reply_id)
+                            this_msg_image.data.allow_sending_without_reply = True
                         this_msg_image.do_api()
                         flag_now_type = 'image'
                     elif type(message_this) is OlivOS.messageAPI.PARA.text:
                         this_msg.data.text += message_this.OP()
                         flag_now_type = 'string'
+                        
+        if reply_id is not None:
+            bot_info = get_SDK_bot_info_from_Event(target_event)
+            parse_mode = "MarkdownV2"
+            
+            if flag_now_type != 'image':
+                if this_msg.data.text != '':
+                    telegram_api_caller.send_message_with_reply(
+                        bot_info.access_token,
+                        chat_id,
+                        this_msg.data.text,
+                        reply_to_message_id=reply_id,
+                        parse_mode=parse_mode
+                    )
+            return
         if flag_now_type != 'image':
             if this_msg.data.text != '':
                 this_msg.do_api()
@@ -710,6 +771,8 @@ class API(object):
             def __init__(self):
                 self.chat_id = 0
                 self.photo = ''
+                self.reply_to_message_id = 0
+                self.allow_sending_without_reply = True
 
     class leaveChat(api_templet):
         def __init__(self, bot_info=None):
